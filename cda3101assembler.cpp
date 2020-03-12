@@ -1,448 +1,263 @@
-#include <iostream>
-#include <stdio.h>
+/* Assembler code fragment for LC3101 in C */
+
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
+#include <iostream>
+
+#define MAXLINELENGTH 1000
+#define MAXLABELS 65536 //Instructions said it has this many words of memory
+#define MAXLABELLENGTH 7    //Instructions said labels cannot exceed 6 characters
 
 using namespace std;
 
-#define NUMMEMORY 65536 /* maximum number of data words in memory */
-#define NUMREGS 8 /* number of machine registers */
-#define MAXLINELENGTH 1000
-#define BINARYLENGTH 24
+//I will declare a structure to hold a list of labels as well as the number of
+//Labels, so we can do error checking for duplicate labels and too many labels
 
-#define ADD 0
-#define NAND 1
-#define LW 2
-#define SW 3
-#define BEQ 4
-#define CMOV 5
-#define HALT 6
-#define NOOP 7
+typedef struct LabelList{
+    char label[MAXLABELLENGTH];
+    int labelCount;
+}LabelList;
 
-#define NOOPINSTRUCTION 0x1c00000
+//I will also make a structure to hold the result for the conversion
+typedef struct Result{
+    int arg0, arg1, arg2;
+}Result;
+//Will hold the resulting machine code
+typedef struct binarylist{
+    int binary;
+}binaryList;
 
-/*-----------------------Pipeline Registers--------------------*/
 
-typedef struct IFIDStruct {
-    int instr;
-    int pcPlus1;
-} IFIDType;
+int readAndParse(FILE *, char *, char *, char *, char *, char *);
+int isNumber(char *);
 
-typedef struct IDEXStruct {
-    int instr;
-    int pcPlus1;
-    int readRegA;
-    int readRegB;
-    int offset;
-} IDEXType;
-typedef struct EXMEMStruct {
-    int instr;
-    int branchTarget;
-    int aluResult;
-    int readRegB;
-} EXMEMType;
-
-typedef struct MEMWBStruct {
-    int instr;
-    int writeData;
-} MEMWBType;
-
-typedef struct WBENDStruct {
-    int instr;
-    int writeData;
-} WBENDType;
-
-typedef struct stateStruct {
-    int pc;
-    int instrMem[NUMMEMORY];
-    int dataMem[NUMMEMORY];
-    int reg[NUMREGS];
-    int numMemory;
-    IFIDType IFID;
-    IDEXType IDEX;
-    EXMEMType EXMEM;
-    MEMWBType MEMWB;
-    WBENDType WBEND;
-    int cycles; /* number of cycles run so far */
-} stateType;
-
-int opcode(int);
-int field0(int);
-int field1(int);
-int field2(int);
-int extendNum(int num);
-stateType run (stateStruct state);
-void printState(stateType *);
-void printInstruction(int instr);
-//void printInstruction(stateType *);   //needs to be changed
-int count = 0;
-
-int main(int argc, char *argv[])
-{
-    FILE *filePtr;
-    char binary[33], line[MAXLINELENGTH];
-    int isNum = 0, temp = 0, i = 0;// opcode = 0, regB = 0, regA = 0, destReg = 0, offsetField = 0;
-    stateStruct state;    //initialize stateStruct
-    state.pc = 0;    //initialize the program counter
-    state.cycles = 0;
+int main(int argc, char *argv[]){
+    char *inFileString, *outFileString;
+    FILE *inFilePtr, *outFilePtr;
+    char label[MAXLINELENGTH], opcode[MAXLINELENGTH], arg0[MAXLINELENGTH],
+    arg1[MAXLINELENGTH], arg2[MAXLINELENGTH];
+    char a3[MAXLINELENGTH]; //Will be used later for testing labels
+    int labelCount = 0;
+    int size = 0;
+    int result = 0;
+    LabelList labelList[300];   //List of the label structure, will contain labels so we can search duplicates
+    Result finalresult[300];     //List of result structures, each entry holds a line
+    binaryList binaryList[300];    //Will hold the binary list of each line
     
-    //    DecodedNum DCD[200];
-    //    string decoded;
-    
-    if (argc != 2) {
-        printf("error: usage: %s <machine-code file>\n", argv[0]);
+    if (argc != 3) {
+        printf("error: usage: %s <assembly-code-file> <machine-code-file>\n",
+               argv[0]);
         exit(1);
     }
-    filePtr = fopen(argv[1], "r");
-    if (filePtr == NULL) {
-        printf("error: can't open file %s", argv[1]);
-        perror("fopen");
-        
+    
+    //Taking argv1 (first parameter) the assembly code and outputing the
+    //Machine code to file argv2 (second parameter)
+    inFileString = argv[1];
+    outFileString = argv[2];
+    
+    //r means read
+    inFilePtr = fopen(inFileString, "r");
+    if (inFilePtr == NULL) {
+        printf("error in opening %s\n", inFileString);
         exit(1);
     }
-    /* read in the entire machine-code file into
-     * memory */
-    for(int i = 0; i < 0x7FFF; i++){
-        state.instrMem[i]=0;
-        state.dataMem[i]=0;
-    }
-    for(int i = 0; i < NUMREGS; i++){
-        state.reg[i] = 0;
+    //w means write
+    outFilePtr = fopen(outFileString, "w");
+    if (outFilePtr == NULL) {
+        printf("error in opening %s\n", outFileString);
+        exit(1);
     }
     
-    for (state.numMemory = 0;
-         fgets(line, MAXLINELENGTH, filePtr) != NULL;
-         state.numMemory++) {
-        if (sscanf(line, "%d", state.instrMem+state.numMemory) != 1) {
-            printf("error in reading address %d\n", state.numMemory);
+    //Notes: Create a while loop and do it while
+    //Read and parse doesnt return 0 (thats when it reaches EOL)
+    
+    //Want to make two passes over the assembly program. In first pass
+    //Calculate the address for every symbolic label
+    
+    //On our first iteration we will first do error checking inside a while loop
+    //And then if there are no errors we will store the labels
+    
+    while(readAndParse(inFilePtr, label, opcode, arg0, arg1, arg2)){
+        //First we will check if the op code is good or not, exit 1 if its bad
+        if(strcmp(opcode, "add")&&strcmp(opcode, "nand")&&strcmp(opcode, "lw")&&strcmp(opcode, "sw")&&strcmp(opcode, "beq")&&strcmp(opcode, "cmov")&&strcmp(opcode, "halt")&&strcmp(opcode, "noop")&&strcmp(opcode, ".fill")){
+            printf("Error, incompatible op code %s\n", opcode);
             exit(1);
         }
-    }
-    for(int i = 0; i < state.numMemory; ++i){
-        state.dataMem[i] = state.instrMem[i];
-    }
-    
-    rewind(filePtr);
-    run(state);        //send state into the run function
-    //  printState(&state);
-    return (0);
-}
-
-stateType run (stateType state){
-    stateStruct newState;
-    bool regABool;
-    bool regBBool;
-    int tempALU = 0;
-    //clear the pipeline
-    state.IFID.instr = NOOPINSTRUCTION;
-    state.IDEX.instr = NOOPINSTRUCTION;
-    state.EXMEM.instr = NOOPINSTRUCTION;
-    state.MEMWB.instr = NOOPINSTRUCTION;
-    state.WBEND.instr = NOOPINSTRUCTION;
-    //Memory print out
-    for(int i = 0; i < state.numMemory; ++i){
-        printf("memory[%d]=%d\n", i, state.instrMem[i]);
-    }
-    //run until halt
-    while (1) {
-        tempALU = 0;
-        regABool = false;
-        regBBool = false;
-        printState(&state);
-        
-        /* check for halt */
-        if (opcode(state.MEMWB.instr) == HALT) {
-            printf("machine halted\n");
-            printf("total of %d cycles executed\n", state.cycles);
-            exit(0);
+        //Next we will check if there are enough arguments in the command
+        if((strcmp(opcode, "halt")&&strcmp(opcode, "noop")&&strcmp(opcode, ".fill")&&arg2[0]=='\0')  ||  (!strcmp(opcode, ".fill")&&arg0[0]=='\0')){
+            printf("Not enough arguments in the operation\n");
+            exit(1);
         }
         
-        
-        
-        newState = state;
-        newState.cycles++;
-        
-        /* --------------------- IF stage ---------------------*/
-        newState.IFID.pcPlus1 = state.pc + 1;
-        newState.pc = state.pc + 1;
-        newState.IFID.instr = state.instrMem[state.pc];
-        //    cout << "\nReading " << newState.IFID.instr << " from mem location " << state.pc << endl;
-        //store decoded information to the IFID register,
-        //INSTRUCTION, PC+1
-        
-        
-        /* --------------------- ID stage ---------------------*/
-        newState.IDEX.instr = state.IFID.instr;
-        newState.IDEX.pcPlus1 = state.IFID.pcPlus1;
-        newState.IDEX.readRegA = state.reg[field0(state.IFID.instr)]; //???
-        newState.IDEX.readRegB = state.reg[field1(state.IFID.instr)]; //???
-        newState.IDEX.offset = extendNum(field2(state.IFID.instr)); //???
-        
-        //Stall for lw instruction
-        
-        if(opcode(state.IDEX.instr) == LW){
-            if(field1(state.IDEX.instr) == field0(state.IFID.instr) ||
-               field1(state.IDEX.instr) == field1(state.IFID.instr)){
-                newState.IDEX.instr = NOOPINSTRUCTION;
-                newState.IFID.instr = state.IFID.instr;
-                newState.pc--;
-                newState.IFID.pcPlus1--;
+        if(label[0] != '\0'){
+            //Next we will check the label length
+            if(strlen(label)>=MAXLABELLENGTH){
+                printf("Exceeded the max label length\n");
+                exit(1);
             }
-        }
-        /* --------------------- EX stage ---------------------*/
-        newState.EXMEM.instr = state.IDEX.instr;
-        newState.EXMEM.readRegB = state.IDEX.readRegB;
-        newState.EXMEM.branchTarget = (state.IDEX.offset + state.IDEX.pcPlus1);
-        
-        //FORWARDING INSTRUCTIONS
-        
-        //ALU ----------------------------------------------------------------------
-        if (opcode(state.IDEX.instr) == ADD) {
-            newState.EXMEM.aluResult = (state.IDEX.readRegA + state.IDEX.readRegB);
-            tempALU = (state.IDEX.readRegA + state.IDEX.readRegB);
-        }
-        else if (opcode(state.IDEX.instr) == NAND) {
-            newState.EXMEM.aluResult = ~((state.IDEX.readRegA) & (state.IDEX.readRegB));
-            tempALU = ~(state.IDEX.readRegA) & (state.IDEX.readRegB);
-        }
-        else if (opcode(state.IDEX.instr) == LW) {
-            newState.EXMEM.aluResult = (state.IDEX.readRegA + state.IDEX.offset);
-        }
-        else if (opcode(state.IDEX.instr) == SW) {
-            newState.EXMEM.aluResult = (state.IDEX.readRegA + state.IDEX.offset);
-        }
-        else if (opcode(state.IDEX.instr) == BEQ) {
-            newState.EXMEM.aluResult = state.IDEX.readRegA - state.IDEX.readRegB;
-        }
-        else if (opcode(state.IDEX.instr) == CMOV) {
-            if(state.IDEX.readRegB != 0){
-                newState.EXMEM.aluResult = state.IDEX.readRegA;
-                tempALU = state.IDEX.readRegA;
+            //Next we will make sure the label starts with a letter, not a number
+            if(!sscanf(label, "%[a-zA-Z]", a3)){
+                printf("Label must start with a letter\n");
+                exit(1);
             }
-            else
-                newState.EXMEM.instr = NOOPINSTRUCTION;
-        }
-        else if (opcode(state.IDEX.instr) == NOOP) {
-            newState.EXMEM.aluResult = 0;
-        }
-        //----------------------------------------------------------------------------------
-        //FORWARDING
-        if(opcode(state.IDEX.instr) <= 1 || opcode(state.IDEX.instr == CMOV)){
-            if(field2(state.EXMEM.instr) == field0(state.IFID.instr)){
-                if(!regABool){
-                    //if i have to forward reg A
-                    newState.IDEX.readRegA = tempALU;
-                    //          cout << "EXForwarding " << tempALU << " TO readRegA" << endl;
-                    regABool = true;
+            //Next we will make sure the label has proper characters
+            sscanf(label, "%[a-zA-Z0-9]", a3);
+            if(strcmp(a3, label)){
+                printf("Label has illegal characters inside of it\n");
+                exit(1);
+            }
+            //Next we will check for duplicate labels
+            for(int i=0; i<size; i++){
+                if(!strcmp(label, labelList[i].label)){
+                    printf("Duplicate label found\n");
+                    exit(1);
                 }
             }
-            if(field2(state.EXMEM.instr) == field1(state.IFID.instr)){
-                //if i have to forward reg A
-                if(!regBBool){
-                    newState.IDEX.readRegB = tempALU;
-                    regBBool = true;
-                }
+            //Next we will make sure there arent too many labels (65536)
+            if(size>=MAXLABELS){
+                printf("Maximum number of labels exceeded\n");
+                exit(1);
             }
+            //If we reach here the label is good, and we will add it to
+            //A list of labels so we can check future ones
+            strcpy(labelList[size].label, label);
+            labelList[size].labelCount = labelCount;
+            ++size;
         }
-        /* --------------------- MEM stage ---------------------*/
-        newState.MEMWB.instr = state.EXMEM.instr;
-        if(opcode(state.EXMEM.instr) == ADD){
-            newState.MEMWB.writeData = state.EXMEM.aluResult;
-        }
-        if(opcode(state.EXMEM.instr) == NAND){
-            newState.MEMWB.writeData = state.EXMEM.aluResult;
-        }
-        if(opcode(state.EXMEM.instr) == CMOV){
-            newState.MEMWB.writeData = state.EXMEM.aluResult;
-        }
-        if(opcode(state.EXMEM.instr) == LW){
-            newState.MEMWB.writeData = state.dataMem[state.EXMEM.aluResult];
-        }
-        if(opcode(state.EXMEM.instr) == SW){
-            newState.dataMem[newState.EXMEM.aluResult] = state.EXMEM.readRegB;
-            newState.MEMWB.writeData = 0;
-        }
-        if(opcode(state.EXMEM.instr) == BEQ){
-            if(state.EXMEM.aluResult == 0){
-                //take the branch
-                newState.IFID.instr = NOOPINSTRUCTION;
-                newState.IDEX.instr = NOOPINSTRUCTION;
-                newState.EXMEM.instr = NOOPINSTRUCTION;
-                newState.pc = state.EXMEM.branchTarget;
-                newState.MEMWB.writeData = 0;
-            }
-        }
-        //FORWARDING--------------------------------------------------------
-        if(opcode(state.EXMEM.instr) <= 1 || opcode(state.EXMEM.instr == CMOV)){
-            if(field2(state.EXMEM.instr) == field0(state.IFID.instr)){
-                if(!regABool){
-                    //if i have to forward reg A
-                    newState.IDEX.readRegA = state.EXMEM.aluResult;
-                    //          cout << "MEMForwarding " << state.EXMEM.aluResult << " TO readRegA" << endl;
-                    regABool = true;
-                }
-            }
-            if(field2(state.EXMEM.instr) == field1(state.IFID.instr)){
-                //if i have to forward reg A
-                if(!regBBool){
-                    newState.IDEX.readRegB = state.EXMEM.aluResult;
-                    regBBool = true;
-                }
-            }
-        }
-        if(opcode(state.EXMEM.instr) == LW){
-            if(field0(state.IFID.instr) == field1(state.EXMEM.instr)){
-                if(!regABool){
-                    newState.IDEX.readRegA = state.dataMem[state.EXMEM.aluResult];
-                    //          cout << "MEM2ForwardingA " << state.dataMem[state.EXMEM.aluResult] << " TO readRegA" << endl;
-                    regABool = true;
-                }
-            }
-            if(field1(state.IFID.instr) == field1(state.EXMEM.instr)){
-                if(!regBBool){
-                    newState.IDEX.readRegB = state.dataMem[state.EXMEM.aluResult];
-                    //          cout << "MEM2ForwardingB " << state.dataMem[state.EXMEM.aluResult] << " TO readRegB" << endl;
-                    regBBool = true;
-                }
-            }
-        }
-        //------------------------------------------------------------------
-        
-        /* --------------------- WB stage ---------------------*/
-        newState.WBEND.instr = state.MEMWB.instr;
-        newState.WBEND.writeData = state.MEMWB.writeData;
-        //    cout << "WRITEBACK2: " << state.MEMWB.writeData << endl;
-        if(opcode(state.MEMWB.instr) == CMOV){
-            newState.reg[field2(state.MEMWB.instr)] = state.MEMWB.writeData;
-        }
-        if(opcode(state.MEMWB.instr) == ADD){
-            newState.reg[field2(state.MEMWB.instr)] = state.MEMWB.writeData;
-        }
-        if(opcode(state.MEMWB.instr) == NAND){
-            newState.reg[field2(state.MEMWB.instr)] = state.MEMWB.writeData;
-        }
-        if(opcode(state.MEMWB.instr) == LW){
-            newState.reg[field1(state.MEMWB.instr)] = state.MEMWB.writeData;
-        }
-        if(opcode(state.MEMWB.instr) <= 1 || opcode(state.MEMWB.instr == CMOV)){
-            if(field2(state.MEMWB.instr) == field0(state.IFID.instr)){
-                if(!regABool){
-                    //if i have to forward reg A
-                    newState.IDEX.readRegA = state.MEMWB.writeData;
-                    //          cout << "WBForwarding " << state.MEMWB.writeData << " TO readRegA" << endl;
-                    regABool = true;
-                }
-            }
-            if(field2(state.MEMWB.instr) == field1(state.IFID.instr)){
-                //if i have to forward reg A
-                if(!regBBool){
-                    newState.IDEX.readRegB = state.MEMWB.writeData;
-                    regBBool = true;
-                    //          cout << "WBForwarding " << state.MEMWB.writeData << " TO readRegB" << endl;
-                }
-                //        else cout << " because regBBool was true";
-            }
-        }
-        state = newState; /* this is the last statement before end of the loop.
-                           It marks the end of the cycle and updates the
-                           current state with the values calculated in this
-                           cycle */
-        
+        ++labelCount;
     }
     
-}
-
-void printState(stateType *statePtr){
-    int i;
-    printf("\n@@@\nstate before cycle %d starts\n", statePtr->cycles);
-    printf("\tpc %d\n", statePtr->pc);
-    
-    printf("\tdata memory:\n");
-    for (i=0; i<statePtr->numMemory; i++) {
-        printf("\t\tdataMem[ %d ] %d\n", i, statePtr->dataMem[i]);
-    }
-    printf("\tregisters:\n");
-    for (i=0; i<NUMREGS; i++) {
-        printf("\t\treg[ %d ] %d\n", i, statePtr->reg[i]);
-    }
-    printf("\tIFID:\n");
-    printf("\t\tinstruction ");
-    printInstruction(statePtr->IFID.instr);
-    printf("\t\tpcPlus1 %d\n", statePtr->IFID.pcPlus1);
-    printf("\tIDEX:\n");
-    printf("\t\tinstruction ");
-    printInstruction(statePtr->IDEX.instr);
-    printf("\t\tpcPlus1 %d\n", statePtr->IDEX.pcPlus1);
-    printf("\t\treadRegA %d\n", statePtr->IDEX.readRegA);
-    printf("\t\treadRegB %d\n", statePtr->IDEX.readRegB);
-    printf("\t\toffset %d\n", statePtr->IDEX.offset);
-    printf("\tEXMEM:\n");
-    printf("\t\tinstruction ");
-    printInstruction(statePtr->EXMEM.instr);
-    printf("\t\tbranchTarget %d\n", statePtr->EXMEM.branchTarget);
-    printf("\t\taluResult %d\n", statePtr->EXMEM.aluResult);
-    printf("\t\treadRegB %d\n", statePtr->EXMEM.readRegB);
-    printf("\tMEMWB:\n");
-    printf("\t\tinstruction ");
-    printInstruction(statePtr->MEMWB.instr);
-    printf("\t\twriteData %d\n", statePtr->MEMWB.writeData);
-    printf("\tWBEND:\n");
-    printf("\t\tinstruction ");
-    printInstruction(statePtr->WBEND.instr);
-    printf("\t\twriteData %d\n", statePtr->WBEND.writeData);
-}
-
-int field0(int instruction)
-{
-    return( (instruction>>19) & 0x7);
-}
-
-int field1(int instruction)
-{
-    return( (instruction>>16) & 0x7);
-}
-
-int field2(int instruction)
-{
-    return(instruction & 0xFFFF);
-}
-
-int opcode(int instruction)
-{
-    return(instruction>>22);
-}
-
-void printInstruction(int instr)
-{
-    char opcodeString[10];
-    if (opcode(instr) == ADD) {
-        strcpy(opcodeString, "add");
-    } else if (opcode(instr) == NAND) {
-        strcpy(opcodeString, "nand");
-    } else if (opcode(instr) == LW) {
-        strcpy(opcodeString, "lw");
-    } else if (opcode(instr) == SW) {
-        strcpy(opcodeString, "sw");
-    } else if (opcode(instr) == BEQ) {
-        strcpy(opcodeString, "beq");
-    } else if (opcode(instr) == CMOV) {
-        strcpy(opcodeString, "cmov");
-    } else if (opcode(instr) == HALT) {
-        strcpy(opcodeString, "halt");
-    } else if (opcode(instr) == NOOP) {
-        strcpy(opcodeString, "noop");
-    } else {
-        strcpy(opcodeString, "data");
-    }
-    printf("%s %d %d %d\n", opcodeString, field0(instr), field1(instr),
-           field2(instr));
-}
-
-int extendNum(int num){
-    /*convert a 16-bit number into a 32 bit Sun integer */
-    if (num & (1<<15)){
-        num -= (1<<16);
-    }
-    return (num);
-}
-
+    //Now we will rewind
+    rewind(inFilePtr);
+    int counter = 0;
+    while(readAndParse(inFilePtr, label, opcode, arg0, arg1, arg2)){
+        //Check if argument 2 is a number
+        if(isNumber(arg2)==0){
+            for(int i=0; i<labelCount; i++){
+                if(strcmp(arg2, labelList[i].label)==0){
+                    //Input the arguments to result, atoi converts from string to int
+                    finalresult[counter].arg0 = atoi(arg0);
+                    finalresult[counter].arg1 = atoi(arg1);
+                    finalresult[counter].arg2 = (labelList[i].labelCount-counter);
+                }
+            }
+        }
+        else if(isNumber(arg2)==1){
+            //If arg2 is a number then dont need to calculate the label offset
+            finalresult[counter].arg0 = atoi(arg0);
+            finalresult[counter].arg1 = atoi(arg1);
+            finalresult[counter].arg2 = atoi(arg2);
+        }
+        //Now we will begin converting and putting into the binary list
+        if(!strcmp(opcode, "add")){
+            binaryList[counter].binary = ((0<<22)|(finalresult[counter].arg0<<19)|(finalresult[counter].arg1<<16)|(0xFFFF&(finalresult[counter].arg2<<0)));
+        }
+        if(!strcmp(opcode, "nand")){
+            binaryList[counter].binary = ((1<<22)|(finalresult[counter].arg0<<19)|(finalresult[counter].arg1<<16)|(0xFFFF&(finalresult[counter].arg2<<0)));
+        }
+        if(!strcmp(opcode, "cmov")){
+            binaryList[counter].binary = ((5<<22)|(finalresult[counter].arg0<<19)|(finalresult[counter].arg1<<16)|(0xFFFF&(finalresult[counter].arg2<<0)));
+        }
+        if(!strcmp(opcode, "lw")){
+            binaryList[counter].binary = ((2<<22)|(finalresult[counter].arg0<<19)|(finalresult[counter].arg1<<16)|(0xFFFF&(finalresult[counter].arg2<<0)));
+        }
+        if(!strcmp(opcode, "sw")){
+            binaryList[counter].binary = ((3<<22)|(finalresult[counter].arg0<<19)|(finalresult[counter].arg1<<16)|(0xFFFF&(finalresult[counter].arg2<<0)));
+        }
+        if(!strcmp(opcode, "beq"))
+            if(isNumber(arg2)==0){
+                binaryList[counter].binary = ((4<<22)|(finalresult[counter].arg0<<19)|(finalresult[counter].arg1<<16)|(0xFFFF&(finalresult[counter].arg2-1<<0)));
+            }
+            else{
+                binaryList[counter].binary = ((4<<22)|(finalresult[counter].arg0<<19)|(finalresult[counter].arg1<<16)|(0xFFFF&(finalresult[counter].arg2<<0)));
+            }
+        if(!strcmp(opcode, "halt"))
+            binaryList[counter].binary = ((6<<22));
+        if(!strcmp(opcode, "noop"))
+            binaryList[counter].binary = ((7<<22));
+        if(!strcmp(opcode, ".fill"))
+            if(isNumber(arg0)==0){
+                for(int i=0; i<labelCount; ++i){
+                    if(!strcmp(arg0, labelList[i].label)){
+                        binaryList[counter].binary = (labelList[i].labelCount);
+                        
+                    }
+                }
+            }
+            else{
+            binaryList[counter].binary = finalresult[counter].arg0;
+                       }
+                       if(!strcmp(opcode, ""))
+                       binaryList[counter].binary = '\0';
+                       ++counter;
+                       
+                       }
+                       rewind(inFilePtr);
+                       //Output to the file
+                       for(int j=0; j<counter; j++){
+                           fprintf(outFilePtr, "%d\n", binaryList[j]);
+                       }
+                       
+                       
+                       return(0);
+                       }
+                       
+                    /*
+                     * Read and parse a line of the assembly-language file.  Fields are returned
+                     * in label, opcode, arg0, arg1, arg2 (these strings must have memory already
+                     * allocated to them).
+                     *
+                     * Return values:
+                     *     0 if reached end of file
+                     *     1 if all went well
+                     *
+                     * exit(1) if line is too long.
+                     */
+int readAndParse(FILE *inFilePtr, char *label, char *opcode, char *arg0,char *arg1, char *arg2){
+                        char line[MAXLINELENGTH];
+                        char *ptr = line;
+                        
+                        /* delete prior values */
+                        label[0] = opcode[0] = arg0[0] = arg1[0] = arg2[0] = '\0';
+                        
+                        /* read the line from the assembly-language file */
+                        if (fgets(line, MAXLINELENGTH, inFilePtr) == NULL) {
+                            /* reached end of file */
+                            return(0);
+                        }
+                        
+                        
+                        //THIS IS CAUSING A PROBLEM ON TERMINAL FOR SOME REASON
+                        /* check for line too long (by looking for a \n) */
+                        if (strchr(line, '\n') == NULL) {
+                            /* line too long */
+                            printf("error: line too long\n");
+                            exit(1);
+                        }
+                        
+                        /* is there a label? */
+                        ptr = line;
+                        if (sscanf(ptr, "%[^\t\n ]", label)) {
+                            /* successfully read label; advance pointer over the label */
+                            ptr += strlen(label);
+                        }
+                        
+                        /*
+                         * Parse the rest of the line.  Would be nice to have real regular
+                         * expressions, but scanf will suffice.
+                         */
+                        sscanf(ptr, "%*[\t\n ]%[^\t\n ]%*[\t\n ]%[^\t\n ]%*[\t\n ]%[^\t\n ]%*[\t\n ]%[^\t\n ]",
+                               opcode, arg0, arg1, arg2);
+                        return(1);
+                        //At this point I think the entire line is read?
+                    }
+                       
+                       int
+                       isNumber(char *string)
+                    {
+                        /* return 1 if string is a number */
+                        int i;
+                        return( (sscanf(string, "%d", &i)) == 1);
+                    }
+                       
